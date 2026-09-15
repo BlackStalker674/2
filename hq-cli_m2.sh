@@ -1,78 +1,154 @@
-#!/bin/bash
+#!/usr/bin/env bash
 ###############################################################################
-# hq-cli_m2.sh — Модуль 2: HQ-CLI — комплексная проверка сервисов (Healthcheck)
-# ОС: Альт Linux
-#
-# Проверяет:
-#   1) HTTPS-доступность web.au-team.irpo
-#   2) Разрешение всех A-записей зоны au-team.irpo
-#   3) Доступность веб-приложения на HQ-SRV
-# Выводит SUCCESS / FAIL по каждой проверке и итоговый статус.
+# setup_hq_cli.sh
+# Модуль 2: HQ-CLI — SSSD (домен), sudoers для группы hq, NFS-клиент,
+#            статические записи /etc/hosts, NTP-клиент
+# ОС: ALT Linux
 ###############################################################################
-export DEBIAN_FRONTEND=noninteractive
+set -euo pipefail
 
-apt-get update -y -q >/dev/null 2>&1
-apt-get install -y -q curl bind-utils >/dev/null 2>&1 || apt-get install -y -q curl dnsutils >/dev/null 2>&1
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+log_info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_error()   { echo -e "${RED}[ERROR]${NC} $*"; }
+log_success() { echo -e "${GREEN}[SUCCESS]${NC} $*"; }
 
-RESULT_OK=0
-RESULT_FAIL=0
-
-pass() { echo "[SUCCESS] $1"; RESULT_OK=$((RESULT_OK+1)); }
-fail() { echo "[FAIL]    $1"; RESULT_FAIL=$((RESULT_FAIL+1)); }
-
-echo "==================================================================="
-echo " HEALTHCHECK: au-team.irpo — $(date '+%Y-%m-%d %H:%M:%S')"
-echo "==================================================================="
-
-echo ""
-echo "--- 1. Проверка HTTPS: web.au-team.irpo ---------------------------"
-HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" --max-time 5 https://web.au-team.irpo/)
-if [ "$HTTP_CODE" = "200" ]; then
-    pass "HTTPS web.au-team.irpo отвечает (HTTP $HTTP_CODE)"
-else
-    fail "HTTPS web.au-team.irpo недоступен (HTTP код: ${HTTP_CODE:-нет ответа})"
-fi
-
-echo ""
-echo "--- 2. Проверка DNS-записей зоны au-team.irpo ----------------------"
-declare -A DNS_RECORDS=(
-    ["hq-rtr.au-team.irpo"]="172.16.1.2"
-    ["br-rtr.au-team.irpo"]="172.16.2.2"
-    ["hq-srv.au-team.irpo"]="10.10.10.2"
-    ["hq-cli.au-team.irpo"]="10.10.20.10"
-    ["br-srv.au-team.irpo"]="10.20.10.2"
-    ["docker.au-team.irpo"]="172.16.1.1"
-    ["web.au-team.irpo"]="172.16.2.1"
-)
-
-for NAME in "${!DNS_RECORDS[@]}"; do
-    EXPECTED="${DNS_RECORDS[$NAME]}"
-    RESOLVED=$(dig +short "$NAME" @10.10.10.2 2>/dev/null | tail -n1)
-    if [ "$RESOLVED" = "$EXPECTED" ]; then
-        pass "DNS $NAME -> $RESOLVED"
-    else
-        fail "DNS $NAME (ожидалось $EXPECTED, получено '${RESOLVED:-нет ответа}')"
-    fi
-done
-
-echo ""
-echo "--- 3. Проверка веб-приложения на HQ-SRV ---------------------------"
-APP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://10.10.10.2:8081/)
-if [ "$APP_CODE" = "200" ] || [ "$APP_CODE" = "302" ]; then
-    pass "Веб-приложение HQ-SRV (10.10.10.2:8081) отвечает (HTTP $APP_CODE)"
-else
-    fail "Веб-приложение HQ-SRV недоступно (HTTP код: ${APP_CODE:-нет ответа})"
-fi
-
-echo ""
-echo "==================================================================="
-echo " ИТОГО: успешно ${RESULT_OK} / провалено ${RESULT_FAIL}"
-if [ "$RESULT_FAIL" -eq 0 ]; then
-    echo " ОБЩИЙ СТАТУС: SUCCESS"
-    echo "==================================================================="
-    exit 0
-else
-    echo " ОБЩИЙ СТАТУС: FAIL"
-    echo "==================================================================="
+check_root() {
+  if [[ $EUID -ne 0 ]]; then
+    log_error "Запустите скрипт от имени root (sudo $0)"
     exit 1
-fi
+  fi
+}
+check_root
+
+# ==================== Переменные ====================
+NTP_SERVER="${NTP_SERVER:-172.16.1.1}"
+
+HQ_GROUP="${HQ_GROUP:-hq}"
+
+NFS_SERVER="${NFS_SERVER:-192.168.100.2}"
+NFS_EXPORT="${NFS_EXPORT:-/raid/nfs}"
+NFS_MOUNT="${NFS_MOUNT:-/mnt/nfs}"
+
+# ==================== NTP-клиент ====================
+configure_ntp_client() {
+  log_info "Установка chrony (NTP-клиент)"
+  if ! rpm -q chrony &>/dev/null; then
+    apt-get update -y
+    apt-get install -y chrony
+  else
+    log_warn "chrony уже установлен"
+  fi
+
+  cp -n /etc/chrony.conf /etc/chrony.conf.orig 2>/dev/null || true
+  sed -i -E 's/^(pool[[:space:]].*)/# \1/' /etc/chrony.conf
+  sed -i -E 's/^(server[[:space:]].*)/# \1/' /etc/chrony.conf
+  sed -i "/^server ${NTP_SERVER} iburst/d" /etc/chrony.conf
+
+  cat >> /etc/chrony.conf <<EOF
+
+# ==== Добавлено скриптом setup_hq_cli.sh ====
+server ${NTP_SERVER} iburst
+EOF
+
+  systemctl enable --now chronyd
+  systemctl restart chronyd
+  log_success "NTP-клиент настроен на сервер ${NTP_SERVER}"
+}
+
+# ==================== Domain join / SSSD ====================
+configure_sssd() {
+  log_info "Установка task-auth-ad-sssd"
+  if ! rpm -q task-auth-ad-sssd &>/dev/null; then
+    apt-get update -y
+    apt-get install -y task-auth-ad-sssd
+  else
+    log_warn "task-auth-ad-sssd уже установлен"
+  fi
+
+  log_info "Добавление доменной группы ${HQ_GROUP} в wheel"
+  if command -v roleadd &>/dev/null; then
+    roleadd "${HQ_GROUP}" wheel || log_warn "roleadd вернул ошибку (возможно, уже применено)"
+    log_success "Группа ${HQ_GROUP} добавлена в wheel"
+  else
+    log_warn "Команда roleadd не найдена, пропуск (проверьте установку alterator/control)"
+  fi
+
+  log_info "Настройка ограничений sudo для группы ${HQ_GROUP}"
+  cat > /etc/sudoers.d/hq <<EOF
+%${HQ_GROUP} ALL=(ALL) /bin/cat, /bin/grep, /usr/bin/id, /bin/id
+EOF
+  chmod 440 /etc/sudoers.d/hq
+  visudo -c -f /etc/sudoers.d/hq
+  log_success "/etc/sudoers.d/hq сконфигурирован (cat, grep, id)"
+}
+
+# ==================== NFS-клиент ====================
+configure_nfs_client() {
+  log_info "Настройка автомонтирования NFS (${NFS_SERVER}:${NFS_EXPORT} -> ${NFS_MOUNT})"
+
+  if ! rpm -q nfs-clients &>/dev/null && ! command -v mount.nfs &>/dev/null; then
+    apt-get update -y
+    apt-get install -y nfs-clients || apt-get install -y nfs-utils
+  fi
+
+  mkdir -p "${NFS_MOUNT}"
+
+  local fstab_line="${NFS_SERVER}:${NFS_EXPORT} ${NFS_MOUNT} nfs defaults,_netdev 0 0"
+  if ! grep -qF "${NFS_SERVER}:${NFS_EXPORT}" /etc/fstab; then
+    echo "${fstab_line}" >> /etc/fstab
+    log_success "Запись автомонтирования добавлена в /etc/fstab"
+  else
+    log_warn "Запись для ${NFS_SERVER}:${NFS_EXPORT} уже присутствует в /etc/fstab"
+  fi
+
+  mount -a
+  log_success "NFS-ресурс смонтирован"
+}
+
+# ==================== /etc/hosts ====================
+configure_hosts() {
+  log_info "Добавление статических записей в /etc/hosts"
+
+  add_host_entry() {
+    local ip="$1" fqdn="$2"
+    if ! grep -qE "^[[:space:]]*${ip}[[:space:]]+${fqdn}" /etc/hosts; then
+      echo "${ip}    ${fqdn}" >> /etc/hosts
+      log_success "Добавлена запись: ${ip} ${fqdn}"
+    else
+      log_warn "Запись ${fqdn} уже присутствует в /etc/hosts"
+    fi
+  }
+
+  add_host_entry "172.16.1.1" "web.au-team.irpo"
+  add_host_entry "172.16.2.1" "docker.au-team.irpo"
+}
+
+# ==================== Проверки ====================
+run_checks() {
+  echo
+  log_info "===== Результаты проверки ====="
+  chronyc sources -v || true
+  echo
+  getent group "${HQ_GROUP}" || true
+  getent group wheel || true
+  echo
+  visudo -c -f /etc/sudoers.d/hq || true
+  echo
+  mount | grep "${NFS_MOUNT}" || log_warn "NFS не примонтирован"
+  df -h "${NFS_MOUNT}" || true
+  echo
+  cat /etc/hosts | grep -E "web.au-team.irpo|docker.au-team.irpo" || true
+}
+
+main() {
+  log_info "=== Настройка HQ-CLI (Модуль 2) ==="
+  configure_ntp_client
+  configure_sssd
+  configure_nfs_client
+  configure_hosts
+  run_checks
+  log_success "Настройка HQ-CLI завершена"
+}
+
+main "$@"
