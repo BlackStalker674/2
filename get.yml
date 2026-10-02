@@ -1,0 +1,39 @@
+---
+# =============================================================================
+# get.yml — Ansible playbook: сбор информации о хостах (задание 7)
+# Сохраняет hostname, IP и ОС каждого хоста в /etc/ansible/PC_INFO/
+# Хостов пять: isp, hq-rtr, br-rtr, hq-srv, br-srv (+ hq-cli).
+# Запускать с BR-SRV: ansible-playbook -i /etc/ansible/inventory.yml get.yml
+# =============================================================================
+
+- name: Сбор информации о хостах
+  hosts: all
+  gather_facts: true
+  vars:
+    # У роутеров может не быть default_ipv4 — берём первый непетлевой адрес
+    host_ip: >-
+      {{ ansible_default_ipv4.address
+         | default((ansible_all_ipv4_addresses | first)
+                   | default('нет IPv4'), true) }}
+    host_os: >-
+      {{ (ansible_distribution | default('Неизвестно')) ~ ' ' ~
+         (ansible_distribution_version | default('')) }}
+  tasks:
+    - name: Создать каталог PC_INFO
+      file:
+        path: /etc/ansible/PC_INFO
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+
+    - name: Сохранить hostname, IP и ОС
+      copy:
+        dest: "/etc/ansible/PC_INFO/{{ inventory_hostname }}.yml"
+        content: |
+          Hostname: {{ ansible_hostname | default(inventory_hostname) }}
+          IP_Address: {{ host_ip }}
+          OS: {{ host_os | trim }}
+          Kernel: {{ ansible_kernel | default('неизвестно') }}
+          Uptime: {{ ansible_uptime_seconds | default(0) }} сек.
+      delegate_to: localhost
