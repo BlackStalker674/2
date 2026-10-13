@@ -76,3 +76,9 @@ df -h /raid
 exportfs -v
 systemctl is-active "$NFS_UNIT"
 echo "HQ-SRV: RAID 0 (md0) и NFS готовы. Параметры для отчёта: каталог /raid/nfs, сеть $NFS_NET, опции rw,sync,no_subtree_check"
+wget raw.githubusercontent.com/BlackStalker674/2/refs/heads/main/05_HQ-SRV_dns-for-ad.sh
+chmod +x 05_HQ-SRV_dns-for-ad.sh
+./05_HQ-SRV-dns-for-ad.sh
+wget raw.githubusercontent.com/BlackStalker674/2/refs/heads/main/11_HQ-SRV_web.sh
+chmod +x 11_HQ-SRV_web.sh
+./11_HQ-SRV_web.sh
