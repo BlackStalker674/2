@@ -114,6 +114,14 @@ sshd_set() {   # удаляет все варианты директивы и с
   sed -i "1i $1 $2" "$SSHD_CFG"
 }
 sshd_apply() {
+  # На свежей системе ключи хоста создаются только при первом старте sshd — создаём заранее
+  command -v ssh-keygen >/dev/null 2>&1 || pkg_install openssh-clients
+  ssh-keygen -A >/dev/null 2>&1 || true
+  local t
+  for t in rsa ecdsa ed25519; do
+    [ -s "/etc/openssh/ssh_host_${t}_key" ] || ssh-keygen -q -t "$t" -N '' -f "/etc/openssh/ssh_host_${t}_key" || true
+  done
+  ls /etc/openssh/ssh_host_*_key >/dev/null 2>&1 && ok "SSH host keys present" || die "Could not create SSH host keys"
   /usr/sbin/sshd -t || die "Error in $SSHD_CFG (sshd -t)"
   systemctl enable sshd >/dev/null 2>&1 || true
   systemctl restart sshd || die "sshd did not restart"
