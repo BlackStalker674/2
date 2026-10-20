@@ -264,12 +264,25 @@ EOF
 mount_iso() {
   mkdir -p "$ISO_MNT"
   if mountpoint -q "$ISO_MNT"; then return 0; fi
+  local d cur lbl
   # Образ уже смонтирован в другом месте (например, в /mnt) — используем его
-  local cur; cur="$(findmnt -n -o TARGET -S "$ISO_DEV" 2>/dev/null | head -1 || true)"
-  if [ -n "$cur" ]; then ISO_MNT="$cur"; ok "Additional.iso already mounted at $ISO_MNT"; return 0; fi
-  [ -b "$ISO_DEV" ] || { warn "No $ISO_DEV - attach Additional.iso"; return 1; }
-  mount -o ro "$ISO_DEV" "$ISO_MNT" || { warn "Failed to mount $ISO_DEV"; return 1; }
-  ok "Additional.iso mounted at $ISO_MNT"
+  for d in "$ISO_DEV" /dev/sr[0-9]* /dev/cdrom; do
+    [ -b "$d" ] || continue
+    cur="$(findmnt -n -o TARGET -S "$d" 2>/dev/null | head -1 || true)"
+    if [ -n "$cur" ] && [ ! -e "$cur/meta-data" ]; then ISO_MNT="$cur"; ok "Additional.iso already mounted at $ISO_MNT ($d)"; return 0; fi
+  done
+  # Перебираем все CD-приводы; диск Cloud-Init (cidata) пропускаем
+  for d in "$ISO_DEV" /dev/sr[0-9]* /dev/cdrom; do
+    [ -b "$d" ] || continue
+    lbl="$(blkid -o value -s LABEL "$d" 2>/dev/null || true)"
+    case "$lbl" in cidata|CIDATA|config-2) continue ;; esac
+    mount -o ro "$d" "$ISO_MNT" 2>/dev/null || continue
+    if [ -e "$ISO_MNT/meta-data" ] || [ -e "$ISO_MNT/user-data" ]; then umount "$ISO_MNT" || true; continue; fi
+    ok "Additional.iso mounted at $ISO_MNT ($d${lbl:+, label $lbl})"; return 0
+  done
+  warn "No CD with Additional.iso found. Proxmox: VM -> Hardware -> CD/DVD Drive -> Additional.iso"
+  lsblk -o NAME,TYPE,SIZE,LABEL 2>/dev/null | grep -E 'NAME|rom' || true
+  return 1
 }
 # ============================== МОДУЛЬ 1 =====================================
 step "Interface check and hostname"
@@ -339,7 +352,7 @@ dnsmasq --test || die "Error in /etc/dnsmasq.conf"
 systemctl enable dnsmasq >/dev/null 2>&1
 systemctl restart dnsmasq || die "dnsmasq did not start"
 sleep 1
-set_resolv "$IF_LAN" 127.0.0.1
+set_resolv "$IF_LAN" 77.88.8.8   # по требованию: на сервере nameserver 77.88.8.8
 pkg_try bind-utils || true
 if command -v host >/dev/null 2>&1; then
   host hq-rtr.au-team.irpo 127.0.0.1 | grep -q 192.168.100.1 && ok "A hq-rtr" || die "hq-rtr.au-team.irpo does not resolve"
