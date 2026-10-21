@@ -325,6 +325,20 @@ ok "Got address $CUR_IP"
 [ "$CUR_IP" = "$EXPECTED_IP" ] || warn "Address is $CUR_IP, but DNS hq-cli = $EXPECTED_IP. Check dhcp-host on HQ-RTR"
 grep -q "nameserver $HQ_SRV" /etc/resolv.conf && ok "DNS from DHCP: $HQ_SRV" || warn "resolv.conf has no $HQ_SRV"
 grep -q 'au-team.irpo' /etc/resolv.conf && ok "DNS suffix au-team.irpo received" || warn "No suffix au-team.irpo"
+# DNS только HQ-SRV: убираем 77.88.8.8, если его прописывали вручную для скачивания скрипта,
+# иначе имена au-team.irpo уходят на внешний DNS и не находятся
+mkdir -p "/etc/net/ifaces/$IF_LAN"
+printf 'search %s\nnameserver %s\n' "$AD_DOMAIN" "$HQ_SRV" > "/etc/net/ifaces/$IF_LAN/resolv.conf"
+if command -v resolvconf >/dev/null 2>&1; then
+  resolvconf -a "$IF_LAN" < "/etc/net/ifaces/$IF_LAN/resolv.conf" >/dev/null 2>&1 || true
+  resolvconf -u >/dev/null 2>&1 || true
+fi
+first_ns() { awk '/^nameserver/{print $2; exit}' /etc/resolv.conf 2>/dev/null; }
+if [ "$(first_ns)" != "$HQ_SRV" ]; then
+  chattr -i /etc/resolv.conf 2>/dev/null || true
+  printf 'search %s\nnameserver %s\n' "$AD_DOMAIN" "$HQ_SRV" > /etc/resolv.conf
+fi
+[ "$(first_ns)" = "$HQ_SRV" ] && ok "First DNS server: $HQ_SRV (HQ-SRV)" || warn "First DNS server is $(first_ns), expected $HQ_SRV"
 wait_inet
 
 step "Timezone and NTP"
