@@ -50,12 +50,23 @@ apt_update() {
   apt-get update -q || die "apt-get update failed - check Internet/DNS"
   APT_UPDATED=1
 }
+apt_get_install() {         # apt-get install с повтором: битая загрузка (Checksum mismatch) — частая беда медленной сети
+  local try
+  for try in 1 2 3; do
+    apt-get install -y "$@" && return 0
+    [ "$try" -lt 3 ] || return 1
+    warn "apt-get install failed (attempt $try/3) - removing broken downloads, apt-get update, retrying"
+    rm -f /var/cache/apt/archives/partial/* 2>/dev/null || true
+    apt-get update -q || true
+    sleep 3
+  done
+}
 pkg_install() {             # установка с проверкой наличия в репозитории
   apt_update
   local p miss=()
   for p in "$@"; do apt-cache show "$p" >/dev/null 2>&1 || miss+=("$p"); done
   [ ${#miss[@]} -eq 0 ] || die "Not in repository: ${miss[*]}"
-  apt-get install -y "$@" || die "Install failed: $*"
+  apt_get_install "$@" || die "Install failed: $*"
   for p in "$@"; do rpm -q "$p" >/dev/null 2>&1 || rpm -q --whatprovides "$p" >/dev/null 2>&1 || die "Package $p is not installed"; done
   ok "Packages installed: $*"
 }
@@ -149,7 +160,7 @@ pkg_try() {                 # нефатальная установка: вер�
   apt_update
   local p
   for p in "$@"; do apt-cache show "$p" >/dev/null 2>&1 || { warn "Package $p not found in repository"; return 1; }; done
-  apt-get install -y "$@" || { warn "Failed to install: $*"; return 1; }
+  apt_get_install "$@" || { warn "Failed to install: $*"; return 1; }
   ok "Packages installed: $*"
 }
 create_user() {             # $1 имя, $2 UID (может быть пустым), $3 пароль; группа wheel
