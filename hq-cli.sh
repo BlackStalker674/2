@@ -2,7 +2,7 @@
 # =============================================================================
 #  hq-cli.sh — рабочая станция HQ-CLI (ALT Linux p10 Рабочая станция)
 #  КОД 09.02.06-1-2026
-#   М1: имя, адрес по DHCP от HQ-RTR на VLAN-интерфейсе enp7s1.200
+#   М1: имя, адрес по DHCP от HQ-RTR (VLAN 200: tag=200 на порту ВМ в Proxmox)
 #       (конфиг в etcnet; NetworkManager перечитывает его через плагин etcnet)
 #   М2: ввод в домен au-team.irpo (SSSD), sudo для группы hq (cat, grep, id),
 #       автомонтирование NFS в /mnt/nfs, NTP-клиент, Яндекс Браузер,
@@ -16,8 +16,8 @@ HOST_FQDN="hq-cli.au-team.irpo"
 HOST_SHORT="hq-cli"
 TZ_NAME="Asia/Krasnoyarsk"
 IF_PHYS="enp7s1"                # физический порт
-CLI_VLAN="200"                  # VLAN клиента; пусто = без VLAN
-IF_LAN="$IF_PHYS${CLI_VLAN:+.$CLI_VLAN}"   # enp7s1.200
+CLI_VLAN=""                     # пусто: tag=200 ставит Proxmox на порт ВМ; "200" — если тег ставит сама ВМ
+IF_LAN="$IF_PHYS${CLI_VLAN:+.$CLI_VLAN}"   # enp7s1 (или enp7s1.200)
 EXPECTED_IP="192.168.200.2"     # зарезервирован на HQ-RTR за именем hq-cli
 SSH_PORT="2027"
 SSH_USER="sshuser"; SSH_UID="2027"; PASS="P@ssw0rd"
@@ -270,6 +270,11 @@ EOF
   if [ -n "$6" ]; then printf 'search au-team.irpo\nnameserver %s\n' "$6" > "$d/resolv.conf"; fi
   ok "etcnet: $v (VLAN $vid on $p, $proto ${4:-}, NM_CONTROLLED=$nm)"
 }
+drop_vlans() {              # убрать VLAN-подынтерфейсы $1.* — тег ставит гипервизор (tag= на порту ВМ)
+  local d n
+  for d in /etc/net/ifaces/"$1".*; do [ -d "$d" ] || continue; rm -rf "$d"; warn "Removed old VLAN config $d"; done
+  for n in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep "^$1\\." || true); do ip link del "$n" 2>/dev/null || true; done
+}
 
 # ============================== МОДУЛЬ 1 =====================================
 step "Hostname"
@@ -284,6 +289,7 @@ if [ -n "$CLI_VLAN" ]; then
   modprobe 8021q 2>/dev/null || true
   etcnet_vlan "$IF_PHYS" "$CLI_VLAN" dhcp "" "keep-parent" ""
 else
+  drop_vlans "$IF_PHYS"
   sed -i -E 's/^BOOTPROTO=.*/BOOTPROTO=dhcp/' "/etc/net/ifaces/$IF_LAN/options" 2>/dev/null || etcnet_eth "$IF_LAN" dhcp
   rm -f "/etc/net/ifaces/$IF_LAN/ipv4address" "/etc/net/ifaces/$IF_LAN/ipv4route"
 fi
@@ -301,6 +307,7 @@ apply_net() {
     echo "Applied via etcnet (network service)"
   fi
 }
+ip addr flush dev "$IF_LAN" 2>/dev/null || true   # убрать адрес, заданный вручную для скачивания скрипта
 got_ip() { ip -4 -o addr show "$IF_LAN" 2>/dev/null | grep -v ' 169\.254\.' | grep -q 'inet '; }
 apply_net
 echo "Waiting for DHCP on $IF_LAN (up to 40 s)..."

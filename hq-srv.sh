@@ -15,8 +15,8 @@
 HOST_FQDN="hq-srv.au-team.irpo"
 TZ_NAME="Asia/Krasnoyarsk"
 IF_PHYS="enp7s1"                          # физический порт
-SRV_VLAN="100"                            # VLAN сервера; пусто = без VLAN
-IF_LAN="$IF_PHYS${SRV_VLAN:+.$SRV_VLAN}"   # enp7s1.100
+SRV_VLAN=""                               # пусто: tag=100 ставит Proxmox на порт ВМ; "100" — если тег ставит сама ВМ
+IF_LAN="$IF_PHYS${SRV_VLAN:+.$SRV_VLAN}"   # enp7s1 (или enp7s1.100)
 IP_ADDR="192.168.100.2/27"; GW="192.168.100.1"
 SSH_PORT="2027"
 SSH_USER="sshuser"; SSH_UID="2027"; PASS="P@ssw0rd"
@@ -275,25 +275,37 @@ EOF
   if [ -n "$6" ]; then printf 'search au-team.irpo\nnameserver %s\n' "$6" > "$d/resolv.conf"; fi
   ok "etcnet: $v (VLAN $vid on $p, $proto ${4:-}, NM_CONTROLLED=$nm)"
 }
+drop_vlans() {              # убрать VLAN-подынтерфейсы $1.* — тег ставит гипервизор (tag= на порту ВМ)
+  local d n
+  for d in /etc/net/ifaces/"$1".*; do [ -d "$d" ] || continue; rm -rf "$d"; warn "Removed old VLAN config $d"; done
+  for n in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep "^$1\\." || true); do ip link del "$n" 2>/dev/null || true; done
+}
 
+iso_has_data() {            # это Additional.iso? (есть web, docker, playbook или users.csv)
+  [ -n "$(find "$1" -maxdepth 2 \( -iname web -o -iname docker -o -iname playbook -o -iname users.csv \) 2>/dev/null | head -1)" ]
+}
 mount_iso() {
   mkdir -p "$ISO_MNT"
-  if mountpoint -q "$ISO_MNT"; then return 0; fi
+  if mountpoint -q "$ISO_MNT"; then
+    iso_has_data "$ISO_MNT" && return 0
+    umount "$ISO_MNT" 2>/dev/null || true
+  fi
   local d cur lbl
   # Образ уже смонтирован в другом месте (например, в /mnt) — используем его
   for d in "$ISO_DEV" /dev/sr[0-9]* /dev/cdrom; do
     [ -b "$d" ] || continue
     cur="$(findmnt -n -o TARGET -S "$d" 2>/dev/null | head -1 || true)"
-    if [ -n "$cur" ] && [ ! -e "$cur/meta-data" ]; then ISO_MNT="$cur"; ok "Additional.iso already mounted at $ISO_MNT ($d)"; return 0; fi
+    if [ -n "$cur" ] && iso_has_data "$cur"; then ISO_MNT="$cur"; ok "Additional.iso already mounted at $ISO_MNT ($d)"; return 0; fi
   done
-  # Перебираем все CD-приводы; диск Cloud-Init (cidata) пропускаем
+  # Перебираем все CD-приводы: рядом может стоять образ Кибер Бэкапа или Cloud-Init
   for d in "$ISO_DEV" /dev/sr[0-9]* /dev/cdrom; do
     [ -b "$d" ] || continue
-    lbl="$(blkid -o value -s LABEL "$d" 2>/dev/null || true)"
-    case "$lbl" in cidata|CIDATA|config-2) continue ;; esac
+    findmnt -n -S "$d" >/dev/null 2>&1 && continue
     mount -o ro "$d" "$ISO_MNT" 2>/dev/null || continue
-    if [ -e "$ISO_MNT/meta-data" ] || [ -e "$ISO_MNT/user-data" ]; then umount "$ISO_MNT" || true; continue; fi
-    ok "Additional.iso mounted at $ISO_MNT ($d${lbl:+, label $lbl})"; return 0
+    lbl="$(blkid -o value -s LABEL "$d" 2>/dev/null || true)"
+    if iso_has_data "$ISO_MNT"; then ok "Additional.iso mounted at $ISO_MNT ($d${lbl:+, label $lbl})"; return 0; fi
+    echo "  $d${lbl:+ ($lbl)} is not Additional.iso - skipped"
+    umount "$ISO_MNT" 2>/dev/null || true
   done
   warn "No CD with Additional.iso found. Proxmox: VM -> Hardware -> CD/DVD Drive -> Additional.iso"
   lsblk -o NAME,TYPE,SIZE,LABEL 2>/dev/null | grep -E 'NAME|rom' || true
@@ -310,6 +322,7 @@ if [ -n "$SRV_VLAN" ]; then
   modprobe 8021q 2>/dev/null || true
   etcnet_vlan "$IF_PHYS" "$SRV_VLAN" static "$IP_ADDR" "$GW" "$DNS_FWD1"
 else
+  drop_vlans "$IF_PHYS"
   etcnet_eth "$IF_LAN" static "$IP_ADDR" "$GW" "$DNS_FWD1"
 fi
 restart_network
