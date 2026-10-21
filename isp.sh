@@ -469,8 +469,25 @@ EOF
     nginx -t || die "nginx config error (nginx -t)"
   fi
   ln -sf /etc/nginx/sites-available.d/proxy.conf /etc/nginx/sites-enabled.d/proxy.conf
+  nginx_443() {     # nginx может открыть порт не сразу (загрузка движка ГОСТ) — ждём до 15 с
+    local i
+    for i in $(seq 1 15); do ss -tln 'sport = :443' 2>/dev/null | grep -q LISTEN && return 0; sleep 1; done
+    return 1
+  }
   systemctl restart nginx || die "nginx did not restart"
-  ss -tln | grep -q ':443 ' && ok "nginx listens on 443 (GOST: $([ $USE_GOST = 1 ] && echo yes || echo no)), HTTP -> HTTPS" || die "nginx does not listen on 443"
+  if ! nginx_443 && [ "$USE_GOST" = 1 ]; then
+    warn "nginx does not listen on 443 with GOST keys - restarting with RSA chain only"
+    journalctl -u nginx -n 10 --no-pager 2>/dev/null || true
+    USE_GOST=0; write_conf 0
+    nginx -t || die "nginx config error (nginx -t)"
+    systemctl restart nginx || die "nginx did not restart"
+  fi
+  if ! nginx_443; then
+    systemctl status nginx --no-pager -l 2>/dev/null | tail -15 || true
+    ss -tlnp 2>/dev/null | grep -E 'nginx|:80 |:443 ' || true
+    die "nginx does not listen on 443 (see status above)"
+  fi
+  ok "nginx listens on 443 (GOST: $([ $USE_GOST = 1 ] && echo yes || echo no)), HTTP -> HTTPS"
   for n in web docker; do
     openssl x509 -in "$SSL_DIR/$n-rsa.crt" -noout -subject -enddate | tr '\n' ' '; echo
   done
