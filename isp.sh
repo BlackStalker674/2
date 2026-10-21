@@ -471,7 +471,7 @@ EOF
   ln -sf /etc/nginx/sites-available.d/proxy.conf /etc/nginx/sites-enabled.d/proxy.conf
   nginx_443() {     # nginx может открыть порт не сразу (загрузка движка ГОСТ) — ждём до 15 с
     local i
-    for i in $(seq 1 15); do ss -tln 'sport = :443' 2>/dev/null | grep -q LISTEN && return 0; sleep 1; done
+    for i in $(seq 1 15); do ss -tln 2>/dev/null | grep -qE ':443[[:space:]]' && return 0; sleep 1; done
     return 1
   }
   systemctl restart nginx || die "nginx did not restart"
