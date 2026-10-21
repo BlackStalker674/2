@@ -141,6 +141,10 @@ sshd_apply() {
   fi
 }
 
+hostname_final() {          # имя могло сброситься при перезапуске сети — проверяем ещё раз
+  [ "$(hostname)" = "$HOST_FQDN" ] || set_hostname "$HOST_FQDN"
+  echo -e "Hostname: ${C_G}$(hostname)${C_N} (the prompt shows the old name until re-login or 'exec bash')"
+}
 pkg_try() {                 # нефатальная установка: вернёт 1, если пакета нет
   apt_update
   local p
@@ -459,6 +463,7 @@ else
 fi
 # ============================== ИТОГ =========================================
 step "Final check"
+hostname_final
 ip -br -4 addr
 ip route
 iptables -t nat -S POSTROUTING

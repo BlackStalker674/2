@@ -149,6 +149,10 @@ sshd_apply() {
   fi
 }
 
+hostname_final() {          # имя могло сброситься при перезапуске сети — проверяем ещё раз
+  [ "$(hostname)" = "$HOST_FQDN" ] || set_hostname "$HOST_FQDN"
+  echo -e "Hostname: ${C_G}$(hostname)${C_N} (the prompt shows the old name until re-login or 'exec bash')"
+}
 pkg_try() {                 # нефатальная установка: вернёт 1, если пакета нет
   apt_update
   local p
@@ -403,6 +407,7 @@ ping -c1 -W2 "$BR_SRV" >/dev/null 2>&1 && ok "BR-SRV ($BR_SRV) replies" || warn 
 
 # ============================== ИТОГ =========================================
 step "Final check"
+hostname_final
 ip -br link show master "$BR_IF" || true
 ip -br -4 addr show "$BR_IF"
 iptables -S FW_TO_SRV

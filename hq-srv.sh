@@ -143,6 +143,10 @@ sshd_apply() {
   fi
 }
 
+hostname_final() {          # имя могло сброситься при перезапуске сети — проверяем ещё раз
+  [ "$(hostname)" = "$HOST_FQDN" ] || set_hostname "$HOST_FQDN"
+  echo -e "Hostname: ${C_G}$(hostname)${C_N} (the prompt shows the old name until re-login or 'exec bash')"
+}
 pkg_try() {                 # нефатальная установка: вернёт 1, если пакета нет
   apt_update
   local p
@@ -724,5 +728,6 @@ curl -s http://127.0.0.1:9090/api/v1/targets 2>/dev/null | grep -o '"health":"[a
 
 # ============================== ИТОГ =========================================
 step "Final check"
+hostname_final
 ip -br -4 addr; cat /proc/mdstat; df -h /raid; exportfs -v
 echo -e "${C_G}HQ-SRV is configured. Log: $LOG_FILE${C_N}"
