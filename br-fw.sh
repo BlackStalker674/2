@@ -298,6 +298,17 @@ if [ -d /etc/net/ifaces/br0 ] || ip link show br0 >/dev/null 2>&1; then
   ip link del br0 2>/dev/null || true
   warn "Removed old bridge br0"
 fi
+# Правила мостового межсетевого экрана от прежней версии (FORWARD DROP, physdev) мешают маршрутизации
+if command -v iptables >/dev/null 2>&1 && { iptables -S 2>/dev/null | grep -q 'FW_TO_SRV\|physdev' || [ -f /etc/sysctl.d/90-br-fw.conf ]; }; then
+  iptables -P INPUT ACCEPT; iptables -P FORWARD ACCEPT; iptables -P OUTPUT ACCEPT
+  iptables -F; iptables -X
+  if [ -f /etc/sysconfig/iptables ]; then iptables-save > /etc/sysconfig/iptables; fi
+  rm -f /etc/sysctl.d/90-br-fw.conf
+  sed -i '/net\.bridge\.bridge-nf-call/d' /etc/net/sysctl.conf 2>/dev/null || true
+  sed -i '/^br_netfilter$/d' /etc/modules 2>/dev/null || true
+  modprobe -r br_netfilter 2>/dev/null || true
+  warn "Removed old bridge firewall rules (policy ACCEPT)"
+fi
 etcnet_eth "$IF_WAN" static "$WAN_IP" "$WAN_GW" "77.88.8.8"
 etcnet_eth "$IF_LAN" static "$LAN_IP"
 enable_forward
