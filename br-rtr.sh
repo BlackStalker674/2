@@ -19,7 +19,8 @@ LAN_IP="192.168.0.1/28"         # не более 16 адресов
 TUN_LOCAL="172.16.2.2"; TUN_REMOTE="172.16.1.2"; TUN_IP="10.10.10.2/30"
 OSPF_KEY="P@ssw0rd"
 IPSEC_PSK="P@ssw0rd"              # общий ключ IPsec
-BR_SRV="192.168.0.2"
+BR_SRV="192.168.0.3"
+BR_FW="192.168.0.2"             # сосед OSPF в сети филиала
 HQ_SRV="192.168.100.2"
 NTP_SRV="172.16.2.1"
 SSH_PORT="2027"
@@ -323,7 +324,7 @@ step "User $ADMIN_USER (passwordless sudo)"
 create_user "$ADMIN_USER" "" "$ADMIN_PASS"
 install_sudoers "$ADMIN_USER" "$ADMIN_USER ALL=(ALL:ALL) NOPASSWD: ALL"
 
-step "OSPF (FRR) - only via tun0, MD5"
+step "OSPF (FRR) - via tun0 and $IF_LAN (BR-FW), MD5"
 pkg_install frr
 backup /etc/frr/daemons
 sed -i -E 's/^ospfd=.*/ospfd=yes/' /etc/frr/daemons
@@ -336,6 +337,12 @@ log syslog informational
 !
 interface tun0
  ip ospf network point-to-point
+ ip ospf mtu-ignore
+ ip ospf authentication message-digest
+ ip ospf message-digest-key 1 md5 $OSPF_KEY
+ no ip ospf passive
+!
+interface $IF_LAN
  ip ospf mtu-ignore
  ip ospf authentication message-digest
  ip ospf message-digest-key 1 md5 $OSPF_KEY
@@ -524,4 +531,5 @@ ip -br -4 addr
 sleep 10
 vtysh -c "show ip ospf neighbor" || true
 ip route | grep -q '192.168.100.0/27' && ok "Route to HQ learned via OSPF" || warn "No HQ routes yet - check hq-rtr and 'show ip ospf neighbor'"
+vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -q "$IF_LAN" && ok "OSPF neighbor on $IF_LAN (BR-FW)" || warn "No OSPF neighbor on $IF_LAN yet - run br-fw.sh"
 echo -e "${C_G}BR-RTR is configured. Log: $LOG_FILE${C_N}"

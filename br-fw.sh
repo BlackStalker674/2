@@ -5,12 +5,14 @@
 #
 #  Схема филиала:  ISP — BR-RTR (enp7s2) —[enp7s1] BR-FW [enp7s2]— BR-SRV
 #
-#  BR-FW — прозрачный межсетевой экран (L2-мост br0): адресация филиала
-#  не меняется (BR-RTR 192.168.0.1, BR-SRV 192.168.0.2), трафик между ними
-#  проходит через мост и фильтруется iptables (br_netfilter + physdev).
-#  Адрес управления самого BR-FW: 192.168.0.3/28 на br0.
+#  Адресация филиала (одна сеть 192.168.0.0/28):
+#    BR-RTR 192.168.0.1 (шлюз)   BR-FW 192.168.0.2 (br0)   BR-SRV 192.168.0.3
+#  BR-SRV связан с BR-RTR только через BR-FW: порты enp7s1/enp7s2 собраны
+#  в мост br0, трафик проходит через BR-FW и фильтруется iptables.
 #
-#   - имя, часовой пояс, пользователь net_admin (sudo), SSH 2027
+#   - базовая настройка (как в модуле 1): имя, адрес, часовой пояс,
+#     пользователь net_admin (sudo без пароля), SSH 2027
+#   - OSPF (FRR) на br0: сосед BR-RTR, область 0, аутентификация MD5
 #   - мост br0 (etcnet), NTP-клиент, rsyslog на HQ-SRV
 #   - политика по умолчанию DROP; к BR-SRV разрешены только нужные службы:
 #     SSH 2027, testapp 8080, DNS, Kerberos, LDAP, SMB/RPC (домен),
@@ -25,8 +27,10 @@ TZ_NAME="Asia/Krasnoyarsk"
 IF_OUT="enp7s1"                 # к BR-RTR
 IF_IN="enp7s2"                  # к BR-SRV
 BR_IF="br0"
-MGMT_IP="192.168.0.3/28"; GW="192.168.0.1"
-BR_SRV="192.168.0.2"
+MGMT_IP="192.168.0.2/28"; GW="192.168.0.1"   # BR-FW; шлюз — BR-RTR
+LAN_NET="192.168.0.0/28"
+BR_SRV="192.168.0.3"
+OSPF_KEY="P@ssw0rd"              # тот же ключ MD5, что на BR-RTR и HQ-RTR
 HQ_SRV="192.168.100.2"
 NTP_SRV="172.16.2.1"
 SSH_PORT="2027"
@@ -362,6 +366,40 @@ sshd_set Port "$SSH_PORT"
 sshd_set PermitRootLogin no
 sshd_apply
 
+step "OSPF (FRR) on $BR_IF - neighbor BR-RTR, MD5"
+pkg_install frr
+backup /etc/frr/daemons
+sed -i -E 's/^ospfd=.*/ospfd=yes/' /etc/frr/daemons
+grep -q '^ospfd=yes' /etc/frr/daemons || die "ospfd is not enabled in /etc/frr/daemons"
+backup /etc/frr/frr.conf
+cat > /etc/frr/frr.conf <<EOF
+frr defaults traditional
+hostname $HOST_FQDN
+log syslog informational
+!
+interface $BR_IF
+ ip ospf mtu-ignore
+ ip ospf authentication message-digest
+ ip ospf message-digest-key 1 md5 $OSPF_KEY
+ no ip ospf passive
+!
+router ospf
+ ospf router-id ${MGMT_IP%/*}
+ passive-interface default
+ network $LAN_NET area 0
+ area 0 authentication message-digest
+!
+line vty
+!
+EOF
+chown frr:frr /etc/frr/frr.conf 2>/dev/null || true
+chmod 640 /etc/frr/frr.conf
+systemctl enable frr >/dev/null 2>&1
+systemctl restart frr || die "frr did not start"
+sleep 3
+vtysh -c "show running-config" | grep -q "router ospf" || die "OSPF not loaded into FRR"
+ok "OSPF configured on $BR_IF (router-id ${MGMT_IP%/*})"
+
 step "NTP client, Python for Ansible, rsyslog -> HQ-SRV"
 chrony_client "$NTP_SRV"
 pkg_install python3
@@ -391,6 +429,7 @@ iptables -F; iptables -X; iptables -t nat -F
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A INPUT -p icmp -j ACCEPT
+iptables -A INPUT -p 89 -j ACCEPT                 # OSPF от BR-RTR
 iptables -A INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT
 iptables -A INPUT -m limit --limit 5/min -j LOG --log-prefix "BR-FW IN DROP: " --log-level 4
 iptables -P INPUT DROP
@@ -400,6 +439,7 @@ iptables -N FW_TO_SRV
 iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
 iptables -A FORWARD -p icmp -j ACCEPT
+iptables -A FORWARD -p 89 -j ACCEPT               # OSPF-пакеты через мост (без записи в журнал)
 # из сети BR-SRV наружу — всё (обновления, DNS-пересылка, rsyslog, Ansible, NTP)
 iptables -A FORWARD -m physdev --physdev-in "$IF_IN" --physdev-out "$IF_OUT" -j ACCEPT
 # снаружи к BR-SRV — только разрешённые службы
@@ -427,5 +467,15 @@ hostname_final
 ip -br link show master "$BR_IF" || true
 ip -br -4 addr show "$BR_IF"
 iptables -S FW_TO_SRV
+vtysh -c "show ip ospf neighbor" || true
+sleep 1
+if vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -q Full; then ok "OSPF neighbor BR-RTR is Full"
+else
+  echo "Waiting for OSPF neighbor (up to 40 s)..."
+  for i in $(seq 1 20); do vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -q Full && break; sleep 2; done
+  vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -q Full && ok "OSPF neighbor BR-RTR is Full" \
+    || warn "No OSPF neighbor - re-run br-rtr.sh (new version: OSPF on enp7s2) and check: vtysh -c 'show ip ospf neighbor'"
+fi
+ip route | grep -q '192.168.100.0/27' && ok "HQ routes learned via OSPF" || warn "No HQ routes via OSPF yet"
 echo -e "${C_G}BR-FW is configured. Log: $LOG_FILE${C_N}"
 echo "Next: br-srv.sh. Dropped packets: journalctl -k | grep 'BR-FW'"

@@ -15,7 +15,7 @@
 HOST_FQDN="br-srv.au-team.irpo"
 TZ_NAME="Asia/Krasnoyarsk"
 IF_LAN="enp7s1"
-IP_ADDR="192.168.0.2/28"; GW="192.168.0.1"
+IP_ADDR="192.168.0.3/28"; GW="192.168.0.1"   # связь с BR-RTR через BR-FW (192.168.0.2)
 SSH_PORT="2027"
 SSH_USER="sshuser"; SSH_UID="2027"; PASS="P@ssw0rd"
 NTP_SRV="172.16.2.1"
@@ -375,7 +375,7 @@ add_a() {
     || warn "Failed to add $1"
 }
 add_a hq-rtr 192.168.100.1; add_a hq-srv "$HQ_SRV"; add_a hq-cli 192.168.200.2
-add_a br-rtr 192.168.0.1; add_a br-fw 192.168.0.3; add_a docker 172.16.1.1; add_a web 172.16.2.1
+add_a br-rtr 192.168.0.1; add_a br-fw 192.168.0.2; add_a docker 172.16.1.1; add_a web 172.16.2.1
 ok "A records added"
 
 step "Users hquser1..5 and group hq"
@@ -410,7 +410,7 @@ hq-cli ansible_host=192.168.200.2 ansible_user=$SSH_USER
 [routers]
 hq-rtr ansible_host=192.168.100.1 ansible_user=net_admin
 br-rtr ansible_host=192.168.0.1 ansible_user=net_admin
-br-fw ansible_host=192.168.0.3 ansible_user=net_admin
+br-fw ansible_host=192.168.0.2 ansible_user=net_admin
 
 [all:vars]
 ansible_port=$SSH_PORT

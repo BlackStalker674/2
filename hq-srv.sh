@@ -21,7 +21,7 @@ IP_ADDR="192.168.100.2/27"; GW="192.168.100.1"
 SSH_PORT="2027"
 SSH_USER="sshuser"; SSH_UID="2027"; PASS="P@ssw0rd"
 NTP_SRV="172.16.1.1"
-DC_IP="192.168.0.2"                       # Samba DC на BR-SRV
+DC_IP="192.168.0.3"                       # Samba DC на BR-SRV
 DNS_FWD1="77.88.8.8"; DNS_FWD2="77.88.8.3"
 NFS_NET="192.168.200.0/28"                # сеть HQ-CLI
 ISO_DEV="/dev/sr0"; ISO_MNT="/mnt/additional"
@@ -370,7 +370,7 @@ host-record=hq-cli.au-team.irpo,192.168.200.2
 # ---- Таблица 3: только записи A ----
 address=/br-rtr.au-team.irpo/192.168.0.1
 address=/br-srv.au-team.irpo/$DC_IP
-address=/br-fw.au-team.irpo/192.168.0.3
+address=/br-fw.au-team.irpo/192.168.0.2
 address=/docker.au-team.irpo/172.16.1.1
 address=/web.au-team.irpo/172.16.2.1
 # ---- Модуль 3: мониторинг ----
