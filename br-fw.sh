@@ -384,6 +384,8 @@ hostname_final
 ip -br -4 addr
 ip route
 vtysh -c "show ip ospf neighbor" || true
+echo "Waiting for HQ routes via OSPF (up to 30 s)..."
+for i in $(seq 1 15); do ip route | grep -q '192.168.100.0/27' && break; sleep 2; done
 ip route | grep -q '192.168.100.0/27' && ok "HQ routes learned via OSPF" || warn "No HQ routes via OSPF yet - check hq-rtr/br-rtr"
 ping -c1 -W2 "$BR_SRV" >/dev/null 2>&1 && ok "BR-SRV ($BR_SRV) replies" || warn "BR-SRV ($BR_SRV) does not reply yet (not configured?)"
 echo -e "${C_G}BR-FW is configured. Log: $LOG_FILE${C_N}"
