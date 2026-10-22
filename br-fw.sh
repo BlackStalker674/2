@@ -1,22 +1,18 @@
 #!/bin/bash
 # =============================================================================
-#  br-fw.sh — межсетевой экран филиала BR-FW (ALT Linux p10 / JeOS)
+#  br-fw.sh — маршрутизатор/межсетевой экран филиала BR-FW (ALT Linux p10 / JeOS)
 #  КОД 09.02.06-1-2026
 #
-#  Схема филиала:  ISP — BR-RTR (enp7s2) —[enp7s1] BR-FW [enp7s2]— BR-SRV
+#  Схема филиала:
+#    ISP — BR-RTR [enp7s2 192.168.1.1/30] —— [enp7s1 192.168.1.2/30] BR-FW
+#          BR-FW [enp7s2 192.168.0.1/28] —— BR-SRV 192.168.0.2/28
+#  BR-SRV выходит в сеть только через BR-FW (его шлюз — 192.168.0.1).
 #
-#  Адресация филиала (одна сеть 192.168.0.0/28):
-#    BR-RTR 192.168.0.1 (шлюз)   BR-FW 192.168.0.2 (br0)   BR-SRV 192.168.0.3
-#  BR-SRV связан с BR-RTR только через BR-FW: порты enp7s1/enp7s2 собраны
-#  в мост br0, трафик проходит через BR-FW и фильтруется iptables.
-#
-#   - базовая настройка (как в модуле 1): имя, адрес, часовой пояс,
-#     пользователь net_admin (sudo без пароля), SSH 2027
-#   - OSPF (FRR) на br0: сосед BR-RTR, область 0, аутентификация MD5
-#   - мост br0 (etcnet), NTP-клиент, rsyslog на HQ-SRV
-#   - политика по умолчанию DROP; к BR-SRV разрешены только нужные службы:
-#     SSH 2027, testapp 8080, DNS, Kerberos, LDAP, SMB/RPC (домен),
-#     node_exporter 9100, ICMP; из BR-SRV наружу — всё; отброшенное — в журнал
+#   - базовая настройка (как в модуле 1): имя, адресация, IP-маршрутизация,
+#     часовой пояс, пользователь net_admin (sudo без пароля), SSH 2027
+#   - OSPF (FRR, область 0): сосед BR-RTR через 192.168.1.0/30 (MD5),
+#     сеть BR-SRV 192.168.0.0/28 анонсируется (интерфейс пассивный)
+#   - NTP-клиент, rsyslog на HQ-SRV
 #
 #  Запуск: после br-rtr.sh и ДО br-srv.sh (без BR-FW у BR-SRV нет связи).
 # =============================================================================
@@ -24,21 +20,17 @@
 # ---------------------------- ПАРАМЕТРЫ --------------------------------------
 HOST_FQDN="br-fw.au-team.irpo"
 TZ_NAME="Asia/Krasnoyarsk"
-IF_OUT="enp7s1"                 # к BR-RTR
-IF_IN="enp7s2"                  # к BR-SRV
-BR_IF="br0"
-MGMT_IP="192.168.0.2/28"; GW="192.168.0.1"   # BR-FW; шлюз — BR-RTR
-LAN_NET="192.168.0.0/28"
-BR_SRV="192.168.0.3"
-OSPF_KEY="P@ssw0rd"              # тот же ключ MD5, что на BR-RTR и HQ-RTR
+IF_WAN="enp7s1"                 # к BR-RTR
+IF_LAN="enp7s2"                 # к BR-SRV
+WAN_IP="192.168.1.2/30"; WAN_GW="192.168.1.1"   # шлюз — BR-RTR
+LAN_IP="192.168.0.1/28"         # шлюз для BR-SRV
+TRANSIT_NET="192.168.1.0/30"; LAN_NET="192.168.0.0/28"
+BR_SRV="192.168.0.2"
 HQ_SRV="192.168.100.2"
 NTP_SRV="172.16.2.1"
 SSH_PORT="2027"
+OSPF_KEY="P@ssw0rd"              # тот же ключ MD5, что на BR-RTR и HQ-RTR
 ADMIN_USER="net_admin"; ADMIN_PASS="P@ssw0rd"
-# Службы BR-SRV, доступные снаружи (через BR-FW)
-ALLOW_TCP="$SSH_PORT,8080,53,88,135,139,389,445,464,636,3268,3269,9100"
-ALLOW_TCP_RANGE="49152:65535"   # динамические порты RPC (ввод в домен)
-ALLOW_UDP="53,88,123,137,138,389,464"
 
 # ---------------------------- ОБЩИЕ ФУНКЦИИ ----------------------------------
 set -Ee   # без pipefail: "cmd | grep -q" иначе ложно падает от SIGPIPE
@@ -291,67 +283,31 @@ drop_vlans() {              # убрать VLAN-подынтерфейсы $1.* 
   for n in $(ip -o link show 2>/dev/null | awk -F': ' '{print $2}' | cut -d@ -f1 | grep "^$1\\." || true); do ip link del "$n" 2>/dev/null || true; done
 }
 
-# ============================== БАЗА =========================================
+# ============================== МОДУЛЬ 1 =====================================
 step "Checking interfaces"
-check_iface "$IF_OUT"; check_iface "$IF_IN"
+check_iface "$IF_WAN"; check_iface "$IF_LAN"
 
 step "Hostname"
 set_hostname "$HOST_FQDN"
 
-step "Bridge $BR_IF ($IF_OUT + $IF_IN), management $MGMT_IP"
-modprobe bridge 2>/dev/null || true
-etcnet_eth "$IF_OUT" static ""          # порты моста — без IP-адресов
-etcnet_eth "$IF_IN"  static ""
-mkdir -p "/etc/net/ifaces/$BR_IF"
-cat > "/etc/net/ifaces/$BR_IF/options" <<EOF
-TYPE=bri
-HOST='$IF_OUT $IF_IN'
-DISABLED=no
-NM_CONTROLLED=no
-BOOTPROTO=static
-CONFIG_IPV4=yes
-ONBOOT=yes
-EOF
-echo "$MGMT_IP" > "/etc/net/ifaces/$BR_IF/ipv4address"
-echo "default via $GW" > "/etc/net/ifaces/$BR_IF/ipv4route"
-printf 'search au-team.irpo\nnameserver 77.88.8.8\n' > "/etc/net/ifaces/$BR_IF/resolv.conf"
-ok "etcnet: $BR_IF = $IF_OUT + $IF_IN, $MGMT_IP, gw $GW"
-
-bridge_ok() {
-  ip link show "$BR_IF" >/dev/null 2>&1 \
-    && ip -o link show master "$BR_IF" 2>/dev/null | grep -q "$IF_OUT" \
-    && ip -o link show master "$BR_IF" 2>/dev/null | grep -q "$IF_IN" \
-    && ip -4 addr show "$BR_IF" | grep -q "${MGMT_IP%/*}"
-}
-bridge_manual() {             # запасной вариант: собрать мост вручную (до перезагрузки)
-  ip link add "$BR_IF" type bridge 2>/dev/null || true
-  for i in "$IF_OUT" "$IF_IN"; do ip addr flush dev "$i"; ip link set "$i" master "$BR_IF"; ip link set "$i" up; done
-  ip link set "$BR_IF" up
-  ip addr replace "$MGMT_IP" dev "$BR_IF"
-  ip route replace default via "$GW"
-  chattr -i /etc/resolv.conf 2>/dev/null || true
-  printf 'search au-team.irpo\nnameserver 77.88.8.8\n' > /etc/resolv.conf
-}
+step "Addressing: $IF_WAN $WAN_IP (to BR-RTR), $IF_LAN $LAN_IP (to BR-SRV)"
+# Мост br0 от прежней версии скрипта больше не нужен
+if [ -d /etc/net/ifaces/br0 ] || ip link show br0 >/dev/null 2>&1; then
+  rm -rf /etc/net/ifaces/br0
+  ip link set br0 down 2>/dev/null || true
+  ip link del br0 2>/dev/null || true
+  warn "Removed old bridge br0"
+fi
+etcnet_eth "$IF_WAN" static "$WAN_IP" "$WAN_GW" "77.88.8.8"
+etcnet_eth "$IF_LAN" static "$LAN_IP"
+enable_forward
 restart_network
-sleep 2
-BR_MANUAL=0
-if bridge_ok; then ok "Bridge $BR_IF is up (etcnet)"
-else
-  warn "etcnet did not build $BR_IF - building it manually for now"
-  bridge_manual; BR_MANUAL=1
-  bridge_ok && ok "Bridge $BR_IF is up (manual)" || { ip -br link; ip -br addr; die "Bridge $BR_IF could not be created"; }
-fi
+ip -4 addr show "$IF_WAN" | grep -q "${WAN_IP%/*}" || die "$IF_WAN has no address $WAN_IP"
+ip -4 addr show "$IF_LAN" | grep -q "${LAN_IP%/*}" || die "$IF_LAN has no address $LAN_IP"
+ok "Interfaces are up"
+ping -c2 -W2 "$WAN_GW" >/dev/null 2>&1 && ok "BR-RTR ($WAN_GW) replies" \
+  || die "BR-RTR ($WAN_GW) does not reply - run the new br-rtr.sh first ($IF_LAN = ${WAN_GW}/30)"
 wait_inet
-if [ "$BR_MANUAL" = 1 ]; then
-  # etcnet собирает мост через brctl — ставим bridge-utils и пробуем ещё раз
-  pkg_try bridge-utils || true
-  restart_network; sleep 2
-  if bridge_ok; then ok "Bridge $BR_IF is now managed by etcnet (survives reboot)"
-  else bridge_manual; warn "etcnet still cannot build $BR_IF - it is up now, but check after reboot"; fi
-  wait_inet
-fi
-ping -c2 -W2 "$BR_SRV" >/dev/null 2>&1 && ok "BR-SRV ($BR_SRV) is reachable through the bridge" \
-  || warn "BR-SRV ($BR_SRV) does not reply yet (not configured?)"
 
 step "Timezone"
 set_tz
@@ -366,7 +322,7 @@ sshd_set Port "$SSH_PORT"
 sshd_set PermitRootLogin no
 sshd_apply
 
-step "OSPF (FRR) on $BR_IF - neighbor BR-RTR, MD5"
+step "OSPF (FRR): neighbor BR-RTR via $IF_WAN (MD5), announce $LAN_NET"
 pkg_install frr
 backup /etc/frr/daemons
 sed -i -E 's/^ospfd=.*/ospfd=yes/' /etc/frr/daemons
@@ -377,15 +333,16 @@ frr defaults traditional
 hostname $HOST_FQDN
 log syslog informational
 !
-interface $BR_IF
+interface $IF_WAN
  ip ospf mtu-ignore
  ip ospf authentication message-digest
  ip ospf message-digest-key 1 md5 $OSPF_KEY
  no ip ospf passive
 !
 router ospf
- ospf router-id ${MGMT_IP%/*}
+ ospf router-id ${WAN_IP%/*}
  passive-interface default
+ network $TRANSIT_NET area 0
  network $LAN_NET area 0
  area 0 authentication message-digest
 !
@@ -398,84 +355,25 @@ systemctl enable frr >/dev/null 2>&1
 systemctl restart frr || die "frr did not start"
 sleep 3
 vtysh -c "show running-config" | grep -q "router ospf" || die "OSPF not loaded into FRR"
-ok "OSPF configured on $BR_IF (router-id ${MGMT_IP%/*})"
+ok "OSPF configured (router-id ${WAN_IP%/*})"
+echo "Waiting for OSPF neighbor BR-RTR (up to 60 s)..."
+for i in $(seq 1 30); do vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -q Full && break; sleep 2; done
+vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -q Full && ok "OSPF neighbor BR-RTR is Full" \
+  || warn "No OSPF neighbor yet - run the new br-rtr.sh (OSPF on enp7s2) and check: vtysh -c 'show ip ospf neighbor'"
 
+# ============================== МОДУЛЬ 2/3 ===================================
 step "NTP client, Python for Ansible, rsyslog -> HQ-SRV"
 chrony_client "$NTP_SRV"
 pkg_install python3
 rsyslog_client "$HQ_SRV"
 
-# ============================== МЕЖСЕТЕВОЙ ЭКРАН ==============================
-step "Firewall: filtering bridged traffic (br_netfilter + iptables)"
-pkg_install iptables
-modprobe br_netfilter || die "br_netfilter module not available"
-grep -qx br_netfilter /etc/modules 2>/dev/null || echo br_netfilter >> /etc/modules
-sysctl -w net.bridge.bridge-nf-call-iptables=1 >/dev/null
-sysctl -w net.bridge.bridge-nf-call-ip6tables=0 >/dev/null
-mkdir -p /etc/sysctl.d
-printf 'net.bridge.bridge-nf-call-iptables = 1\nnet.bridge.bridge-nf-call-ip6tables = 0\n' > /etc/sysctl.d/90-br-fw.conf
-for k in net.bridge.bridge-nf-call-iptables; do
-  grep -q "^$k" /etc/net/sysctl.conf 2>/dev/null || echo "$k = 1" >> /etc/net/sysctl.conf
-done
-[ "$(cat /proc/sys/net/bridge/bridge-nf-call-iptables)" = 1 ] && ok "Bridged traffic goes through iptables" \
-  || die "bridge-nf-call-iptables is not 1"
-iptables -m physdev -h >/dev/null 2>&1 || die "iptables physdev match is not available"
-
-# Сначала ACCEPT, чтобы не потерять доступ на время перестройки правил
-iptables -P INPUT ACCEPT; iptables -P FORWARD ACCEPT; iptables -P OUTPUT ACCEPT
-iptables -F; iptables -X; iptables -t nat -F
-
-# --- сам BR-FW ---
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -p icmp -j ACCEPT
-iptables -A INPUT -p 89 -j ACCEPT                 # OSPF от BR-RTR
-iptables -A INPUT -p tcp --dport "$SSH_PORT" -j ACCEPT
-iptables -A INPUT -m limit --limit 5/min -j LOG --log-prefix "BR-FW IN DROP: " --log-level 4
-iptables -P INPUT DROP
-
-# --- трафик через мост ---
-iptables -N FW_TO_SRV
-iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
-iptables -A FORWARD -p icmp -j ACCEPT
-iptables -A FORWARD -p 89 -j ACCEPT               # OSPF-пакеты через мост (без записи в журнал)
-# из сети BR-SRV наружу — всё (обновления, DNS-пересылка, rsyslog, Ansible, NTP)
-iptables -A FORWARD -m physdev --physdev-in "$IF_IN" --physdev-out "$IF_OUT" -j ACCEPT
-# снаружи к BR-SRV — только разрешённые службы
-iptables -A FORWARD -m physdev --physdev-in "$IF_OUT" --physdev-out "$IF_IN" -j FW_TO_SRV
-iptables -A FW_TO_SRV -p tcp -m multiport --dports "$ALLOW_TCP" -j ACCEPT
-iptables -A FW_TO_SRV -p tcp --dport "$ALLOW_TCP_RANGE" -j ACCEPT
-iptables -A FW_TO_SRV -p udp -m multiport --dports "$ALLOW_UDP" -j ACCEPT
-iptables -A FW_TO_SRV -m limit --limit 5/min -j LOG --log-prefix "BR-FW FWD DROP: " --log-level 4
-iptables -A FW_TO_SRV -j DROP
-iptables -P FORWARD DROP
-
-iptables-save > /etc/sysconfig/iptables || die "Failed to save rules"
-systemctl enable iptables >/dev/null 2>&1 || warn "Failed to enable iptables.service"
-ok "Rules saved to /etc/sysconfig/iptables (policy DROP)"
-echo "Allowed to BR-SRV: tcp $ALLOW_TCP,$ALLOW_TCP_RANGE; udp $ALLOW_UDP; icmp"
-
-step "Checking connectivity after firewall"
-ping -c1 -W2 77.88.8.8 >/dev/null 2>&1 && ok "BR-FW still has Internet" || warn "BR-FW has no Internet after firewall"
-ping -c1 -W2 "$GW" >/dev/null 2>&1 && ok "BR-RTR ($GW) replies" || warn "BR-RTR ($GW) does not reply"
-ping -c1 -W2 "$BR_SRV" >/dev/null 2>&1 && ok "BR-SRV ($BR_SRV) replies" || warn "BR-SRV ($BR_SRV) does not reply (not configured yet?)"
-
 # ============================== ИТОГ =========================================
 step "Final check"
 hostname_final
-ip -br link show master "$BR_IF" || true
-ip -br -4 addr show "$BR_IF"
-iptables -S FW_TO_SRV
+ip -br -4 addr
+ip route
 vtysh -c "show ip ospf neighbor" || true
-sleep 1
-if vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -q Full; then ok "OSPF neighbor BR-RTR is Full"
-else
-  echo "Waiting for OSPF neighbor (up to 40 s)..."
-  for i in $(seq 1 20); do vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -q Full && break; sleep 2; done
-  vtysh -c "show ip ospf neighbor" 2>/dev/null | grep -q Full && ok "OSPF neighbor BR-RTR is Full" \
-    || warn "No OSPF neighbor - re-run br-rtr.sh (new version: OSPF on enp7s2) and check: vtysh -c 'show ip ospf neighbor'"
-fi
-ip route | grep -q '192.168.100.0/27' && ok "HQ routes learned via OSPF" || warn "No HQ routes via OSPF yet"
+ip route | grep -q '192.168.100.0/27' && ok "HQ routes learned via OSPF" || warn "No HQ routes via OSPF yet - check hq-rtr/br-rtr"
+ping -c1 -W2 "$BR_SRV" >/dev/null 2>&1 && ok "BR-SRV ($BR_SRV) replies" || warn "BR-SRV ($BR_SRV) does not reply yet (not configured?)"
 echo -e "${C_G}BR-FW is configured. Log: $LOG_FILE${C_N}"
-echo "Next: br-srv.sh. Dropped packets: journalctl -k | grep 'BR-FW'"
+echo "Next: br-srv.sh (BR-SRV: 192.168.0.2/28, gateway 192.168.0.1)"

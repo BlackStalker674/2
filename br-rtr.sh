@@ -13,14 +13,14 @@
 HOST_FQDN="br-rtr.au-team.irpo"
 TZ_NAME="Asia/Krasnoyarsk"
 IF_WAN="enp7s1"                 # к ISP
-IF_LAN="enp7s2"                 # к BR-SRV
+IF_LAN="enp7s2"                 # к BR-FW (транзит 192.168.1.0/30)
 WAN_IP="172.16.2.2/28"; WAN_GW="172.16.2.1"
-LAN_IP="192.168.0.1/28"         # не более 16 адресов
+LAN_IP="192.168.1.1/30"; LAN_NET="192.168.1.0/30"   # BR-FW = 192.168.1.2
 TUN_LOCAL="172.16.2.2"; TUN_REMOTE="172.16.1.2"; TUN_IP="10.10.10.2/30"
 OSPF_KEY="P@ssw0rd"
 IPSEC_PSK="P@ssw0rd"              # общий ключ IPsec
-BR_SRV="192.168.0.3"
-BR_FW="192.168.0.2"             # сосед OSPF в сети филиала
+BR_SRV="192.168.0.2"            # за BR-FW (сеть 192.168.0.0/28 приходит по OSPF)
+BR_FW="192.168.1.2"             # сосед OSPF
 HQ_SRV="192.168.100.2"
 NTP_SRV="172.16.2.1"
 SSH_PORT="2027"
@@ -352,7 +352,7 @@ router ospf
  ospf router-id ${TUN_IP%/*}
  passive-interface default
  network 10.10.10.0/30 area 0
- network 192.168.0.0/28 area 0
+ network $LAN_NET area 0
  area 0 authentication message-digest
 !
 line vty
