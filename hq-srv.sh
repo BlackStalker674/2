@@ -396,21 +396,44 @@ chrony_client "$NTP_SRV"
 
 step "RAID0 /dev/md0 -> /raid (ext4)"
 pkg_install mdadm
+# Массив из прошлого запуска после перезагрузки может собраться как /dev/md127 —
+# по заданию нужно md0: останавливаем и собираем заново под именем md0 (данные сохраняются)
+if [ ! -b /dev/md0 ]; then
+  for m in /dev/md[0-9]*; do
+    [ -b "$m" ] || continue
+    case "$m" in *p[0-9]*) continue ;; esac
+    mdadm --detail "$m" 2>/dev/null | grep -q 'Raid Level : raid0' || continue
+    MD_DEVS="$(mdadm --detail "$m" | awk '/active sync/{print $NF}' | tr '\n' ' ')"
+    [ -n "$MD_DEVS" ] || continue
+    warn "Found existing RAID0 $m ($MD_DEVS) - reassembling it as /dev/md0"
+    systemctl stop nfs-server nfs >/dev/null 2>&1 || true
+    exportfs -ua 2>/dev/null || true
+    umount /raid 2>/dev/null || true
+    umount "${m}p1" 2>/dev/null || true
+    mdadm --stop "$m" || die "mdadm --stop $m failed (busy? check: lsof /raid)"
+    # shellcheck disable=SC2086
+    mdadm --assemble /dev/md0 $MD_DEVS || die "mdadm --assemble /dev/md0 failed"
+    partprobe /dev/md0 2>/dev/null || true; sleep 2
+    ok "Array reassembled as /dev/md0"
+    break
+  done
+fi
 if [ -b /dev/md0 ]; then
-  warn "/dev/md0 already exists - creation skipped"
+  ok "/dev/md0 exists - creation skipped"
 else
   mapfile -t DISKS < <(lsblk -dnbpo NAME,TYPE,SIZE | awk '$2=="disk" && $3>=900000000 && $3<=1300000000 {print $1}' |
-    while read -r d; do [ "$(lsblk -no NAME "$d" | wc -l)" -eq 1 ] && ! mdadm --examine "$d" >/dev/null 2>&1 && echo "$d"; done)
-  [ ${#DISKS[@]} -ge 2 ] || die "Need two free ~1 GB disks, found: ${DISKS[*]:-none}"
+    while read -r d; do
+      if [ "$(lsblk -no NAME "$d" | wc -l)" -eq 1 ] && ! mdadm --examine "$d" >/dev/null 2>&1; then echo "$d"; fi
+    done || true)
+  [ ${#DISKS[@]} -ge 2 ] || { lsblk; die "Need two free ~1 GB disks, found: ${DISKS[*]:-none}"; }
   echo "Disks for array: ${DISKS[0]} ${DISKS[1]}"
   mdadm --create /dev/md0 --level=0 --raid-devices=2 --run "${DISKS[0]}" "${DISKS[1]}" || die "mdadm --create failed"
 fi
-{ echo "DEVICE partitions"; mdadm --detail --scan; } > /etc/mdadm.conf
-if grep -q '^ARRAY' /etc/mdadm.conf; then
-  ok "Array config saved to /etc/mdadm.conf: $(grep '^ARRAY' /etc/mdadm.conf | awk '{print $2}' | tr '\n' ' ')"
-else
-  cat /proc/mdstat; die "mdadm --detail --scan returned no arrays"
-fi
+# Имя /dev/md0 закрепляем в конфиге, иначе после перезагрузки массив станет /dev/md127
+MD_UUID="$(mdadm --detail --export /dev/md0 | sed -n 's/^MD_UUID=//p')"
+[ -n "$MD_UUID" ] || die "Could not read UUID of /dev/md0"
+printf 'DEVICE partitions\nARRAY /dev/md0 metadata=1.2 UUID=%s\n' "$MD_UUID" > /etc/mdadm.conf
+ok "Array config saved to /etc/mdadm.conf: /dev/md0 UUID=$MD_UUID"
 if [ ! -b /dev/md0p1 ]; then
   echo ',,L' | sfdisk -q /dev/md0 || die "Failed to create partition on md0"
   partprobe /dev/md0 2>/dev/null || true; sleep 2
