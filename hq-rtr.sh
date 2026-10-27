@@ -39,8 +39,8 @@ C_R='\033[1;31m'; C_G='\033[1;32m'; C_Y='\033[1;33m'; C_B='\033[1;34m'; C_N='\03
 step() { echo -e "\n${C_B}==> $*${C_N}"; }
 ok()   { echo -e "${C_G}[ OK ]${C_N} $*"; }
 warn() { echo -e "${C_Y}[WARN]${C_N} $*"; }
-die()  { echo -e "${C_R}[FAIL]${C_N} $*"; exit 1; }
-trap 'rc=$?; echo -e "${C_R}[FAIL]${C_N} line ${LINENO}: "${BASH_COMMAND}" returned ${rc}. Log: ${LOG_FILE}"' ERR
+die()  { echo -e "${C_R}[FAIL]${C_N} $*" >&2; exit 1; }
+trap 'rc=$?; echo -e "${C_R}[FAIL]${C_N} line ${LINENO}: "${BASH_COMMAND}" returned ${rc}. Log: ${LOG_FILE}" >&2' ERR
 
 [ "$(id -u)" -eq 0 ] || die "Run this script as root"
 [ -r /etc/altlinux-release ] || warn "No /etc/altlinux-release - script is made for ALT Linux p10"
