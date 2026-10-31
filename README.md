@@ -44,3 +44,4 @@ ISP: внешний интерфейс получает адрес по DHCP; 17
 - **HQ-SRV:** RAID5 `/dev/md0` из трёх дисков → `/raid5`, NFS `/raid5/nfs`, atop каждые 2 минуты, fail2ban 5 попыток → бан на 10 минут, УЦ на ГОСТ (сертификаты на 30 дней).
 - **ISP:** chrony stratum 4, обратный прокси `web.tkhis.pro` (логин `WEB` / `P@ssw0rd`) и `docker.tkhis.pro`; после `isp.sh tls` сайты работают и по HTTPS, и по HTTP.
 - **Ansible на BR-SRV:** повторить проверку и инвентаризацию можно командой `bash /etc/ansible/run-inventory.sh`.
+- **Яндекс Браузер на HQ-CLI:** ставит `hq-cli.sh`; вручную — под root: `apt-get update && apt-get install -y yandex-browser-stable`, а если пакета нет — `epm play yandex-browser`.
